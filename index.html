@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Instant Weather</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- Ajoute Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+</head>
+<body>
+  <button id="darkmode-toggle" aria-label="Activer/Désactiver le mode sombre" style="position: absolute; top: 18px; right: 18px; z-index: 1000; background: #222; color: #fff; border: none; border-radius: 50%; width: 40px; height: 40px; font-size: 1.3em; cursor: pointer;">
+    🌙
+  </button>
+  <div class="container">
+    <h1>Instant Weather</h1>
+
+    <div id="search-section">
+      <label for="zipcode">Code Postal :</label>
+      <input type="text" id="zipcode" placeholder="Entrez un code postal" aria-label="Code Postal" autocomplete="postal-code">
+
+      <label for="commune">Commune :</label>
+      <select id="commune" aria-label="Sélectionnez une commune">
+        <option value="">Sélectionnez une commune</option>
+      </select>
+
+      <button onclick="getCommunes()" aria-label="Rechercher les communes">Rechercher</button>
+      <button id="voir-meteo-btn" style="display:none;" onclick="showWeatherPage()" aria-label="Voir la météo">Voir la météo</button>
+    </div>
+
+    <div id="weather-page" style="display:none;">
+      <h2>Météo pour <span id="city-name"></span></h2>
+      <label for="days">Nombre de jours de prévision :</label>
+      <select id="days" onchange="displayWeather()" aria-label="Nombre de jours de prévision">
+        <option value="1">1 jour</option>
+        <option value="2">2 jours</option>
+        <option value="3">3 jours</option>
+        <option value="4">4 jours</option>
+        <option value="5">5 jours</option>
+        <option value="6">6 jours</option>
+        <option value="7">7 jours</option>
+      </select>
+      <div id="extra-infos" style="font-size: 0.9em; margin: 10px 0; display: flex; flex-wrap: wrap; gap: 10px;">
+        <label><input type="checkbox" id="lat" onchange="displayWeather()" aria-label="Afficher la latitude"> Latitude</label>
+        <label><input type="checkbox" id="lon" onchange="displayWeather()" aria-label="Afficher la longitude"> Longitude</label>
+        <label><input type="checkbox" id="rain" onchange="displayWeather()" aria-label="Afficher le cumul de pluie"> Cumul de pluie</label>
+        <label><input type="checkbox" id="wind" onchange="displayWeather()" aria-label="Afficher le vent moyen"> Vent moyen</label>
+        <label><input type="checkbox" id="dir" onchange="displayWeather()" aria-label="Afficher la direction du vent"> Direction du vent</label>
+      </div>
+      <ul id="weather-info" tabindex="0" aria-live="polite"></ul>
+      <div id="map" style="height: 250px; margin-top: 18px; border-radius: 8px;"></div>
+      <button onclick="resetSearch()" aria-label="Nouvelle recherche">Nouvelle recherche</button>
+    </div>
+  </div>
+  <!-- Ajoute Leaflet JS juste avant la fin du body -->
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    let selectedCommune = null;
+
+    async function getCommunes() {
+      const codePostal = document.getElementById('zipcode').value;
+      const communeSelect = document.getElementById('commune');
+      communeSelect.innerHTML = '<option value="">Chargement...</option>';
+      document.getElementById('voir-meteo-btn').style.display = 'none';
+
+      // Vérification basique du code postal (5 chiffres)
+      if (!/^\d{5}$/.test(codePostal)) {
+        communeSelect.innerHTML = '<option>Code postal invalide</option>';
+        return;
+      }
+
+      try {
+        const response = await fetch(`https://geo.api.gouv.fr/communes?codePostal=${codePostal}&fields=nom,centre&format=json`);
+        if (!response.ok) {
+          communeSelect.innerHTML = '<option>Erreur réseau ou API</option>';
+          return;
+        }
+        const data = await response.json();
+
+        communeSelect.innerHTML = '<option value="">Sélectionnez une commune</option>';
+        if (data.length > 0) {
+          data.forEach(commune => {
+            const option = document.createElement('option');
+            option.value = JSON.stringify(commune);
+            option.textContent = commune.nom;
+            communeSelect.appendChild(option);
+          });
+        } else {
+          communeSelect.innerHTML = '<option>Aucune commune trouvée</option>';
+        }
+      } catch (error) {
+        communeSelect.innerHTML = '<option>Erreur de chargement (réseau ?)</option>';
+        console.error(error);
+      }
+    }
+
+    document.getElementById('commune').addEventListener('change', () => {
+      const communeSelect = document.getElementById('commune');
+      if (!communeSelect.value) {
+        document.getElementById('voir-meteo-btn').style.display = 'none';
+        return;
+      }
+      selectedCommune = JSON.parse(communeSelect.value);
+      document.getElementById('voir-meteo-btn').style.display = 'inline-block';
+    });
+
+    // --- Ajout Leaflet ---
+    let map = null;
+    let marker = null;
+    let windLayer = null;
+
+    function showMap(lat, lon) {
+      if (!map) {
+        map = L.map('map').setView([lat, lon], 12);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+        marker = L.marker([lat, lon]).addTo(map);
+      } else {
+        map.setView([lat, lon], 12);
+        marker.setLatLng([lat, lon]);
+      }
+      // Supprime la flèche si elle existe
+      if (windLayer) {
+        map.removeLayer(windLayer);
+        windLayer = null;
+      }
+    }
+
+    function showWindDirectionOnMap(lat, lon, dir) {
+      // Supprime la flèche précédente si elle existe
+      if (windLayer) {
+        map.removeLayer(windLayer);
+        windLayer = null;
+      }
+      // Ajoute une flèche orientée selon la direction du vent
+      const arrowIcon = L.divIcon({
+        className: 'wind-arrow',
+        html: `<div style="transform: rotate(${dir}deg);">🡺</div>`,
+        iconSize: [30, 30],
+        iconAnchor: [15, 15]
+      });
+      windLayer = L.marker([lat, lon], { icon: arrowIcon }).addTo(map);
+    }
+
+    // Modifie showWeatherPage pour afficher la carte à la sélection
+    function showWeatherPage() {
+      if (!selectedCommune) return;
+      document.getElementById('search-section').style.display = 'none';
+      document.getElementById('weather-page').style.display = 'block';
+      document.getElementById('city-name').textContent = selectedCommune.nom;
+      displayWeather();
+      // Affiche la carte à la position de la commune
+      const [lon, lat] = selectedCommune.centre.coordinates;
+      showMap(lat, lon);
+    }
+
+    // Affichage météo 
+    async function displayWeather() {
+      if (!selectedCommune) return;
+      const nbJours = document.getElementById('days').value;
+      const infoList = document.getElementById('weather-info');
+      infoList.innerHTML = '';
+
+      // Ton token personnel ici
+      const token = '5e392593461f451cde50dd846396cfa2dd9a7e63a369eb0615ee50cc4690d8e7';
+
+      // Coordonnées de la commune
+      const lat = selectedCommune.centre.coordinates[1];
+      const lon = selectedCommune.centre.coordinates[0];
+
+      try {
+        // Appel à l'API Météo Concept pour les prévisions quotidiennes
+        const url = `https://api.meteo-concept.com/api/forecast/daily?token=${token}&latlng=${lat},${lon}&insee=&world=false`;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error('Erreur API météo');
+        const data = await response.json();
+
+        // Emojis météo selon le code météo de l'API
+        const meteoEmojis = {
+          0: "☀️", 1: "🌤️", 2: "⛅", 3: "🌥️", 4: "☁️", 5: "🌦️", 6: "🌧️", 7: "🌧️", 10: "🌩️", 11: "🌩️", 12: "🌧️", 13: "❄️", 14: "🌨️", 15: "🌫️"
+        };
+
+        for (let i = 0; i < nbJours && i < data.forecast.length; i++) {
+          const day = data.forecast[i];
+          // Si le code météo n'est pas connu, on met par défaut ☁️ (nuage)
+          const emoji = meteoEmojis.hasOwnProperty(day.weather) ? meteoEmojis[day.weather] : "☁️";
+          const li = document.createElement('li');
+          li.innerHTML = `${emoji} <strong>Jour ${i + 1}</strong> : Temp. min : ${day.tmin}°C | Temp. max : ${day.tmax}°C<br>
+          🌧️ Probabilité de pluie : ${day.probarain ?? '-'}%<br>
+          ☀️ Temps d'ensoleillement : ${day.sun_hours ?? '-'} h`;
+          infoList.appendChild(li);
+        }
+
+        // Infos supplémentaires
+        if (document.getElementById('lat').checked) {
+          const li = document.createElement('li');
+          li.textContent = `🧭 Latitude : ${lat}`;
+          infoList.appendChild(li);
+        }
+        if (document.getElementById('lon').checked) {
+          const li = document.createElement('li');
+          li.textContent = `🧭 Longitude : ${lon}`;
+          infoList.appendChild(li);
+        }
+        if (document.getElementById('rain').checked) {
+          const li = document.createElement('li');
+          li.textContent = `🌧️ Cumul de pluie : ${data.forecast[0].rr10 ?? '-'} mm`;
+          infoList.appendChild(li);
+        }
+        if (document.getElementById('wind').checked) {
+          const li = document.createElement('li');
+          li.textContent = `💨 Vent moyen : ${data.forecast[0].wind10m ?? '-'} km/h`;
+          infoList.appendChild(li);
+        }
+        if (document.getElementById('dir').checked) {
+          const dir = data.forecast[0].dirwind10m ?? 0;
+          showWindDirectionOnMap(lat, lon, dir);
+        } else {
+          showMap(lat, lon);
+        }
+      } catch (error) {
+        const li = document.createElement('li');
+        li.style.color = 'red';
+        li.textContent = "Erreur lors de la récupération des données météo.";
+        infoList.appendChild(li);
+        console.error(error);
+      }
+    }
+
+    function resetSearch() {
+      document.getElementById('zipcode').value = '';
+      document.getElementById('commune').innerHTML = '<option value="">Sélectionnez une commune</option>';
+      document.getElementById('search-section').style.display = 'block';
+      document.getElementById('weather-page').style.display = 'none';
+      document.getElementById('voir-meteo-btn').style.display = 'none';
+      selectedCommune = null;
+    }
+    // Gestion du mode sombre
+    const darkBtn = document.getElementById('darkmode-toggle');
+    function setDarkMode(on) {
+      if (on) {
+        document.body.classList.add('darkmode');
+        localStorage.setItem('darkmode', 'on');
+        darkBtn.textContent = '☀️';
+      } else {
+        document.body.classList.remove('darkmode');
+        localStorage.setItem('darkmode', 'off');
+        darkBtn.textContent = '🌙';
+      }
+    }
+    if (localStorage.getItem('darkmode') === 'on' ||
+        (localStorage.getItem('darkmode') === null && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      setDarkMode(true);
+    } else {
+      setDarkMode(false);
+    }
+    darkBtn.onclick = () => setDarkMode(!document.body.classList.contains('darkmode'));
+  </script>
+</body>
+</html>
